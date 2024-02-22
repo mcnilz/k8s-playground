@@ -25,19 +25,7 @@ packages:
 - kubectl
 
 runcmd:
-  - [ "/etc/helper/init" ]
-
-users:
-- name: bf
-  uid: 1001
-  gecos: bridgefield
-  sudo: ALL=(ALL) NOPASSWD:ALL
-  groups: users, admin
-  shell: /bin/bash
-  ssh_import_id: None
-  lock_passwd: true
-  ssh_authorized_keys:
-  - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA3KYTYwof2LO8Y6s7qAF2DdIAaqSFcIfOQ6aFUptvaZ martin.schnabel@bridgefield.de
+- ["/etc/helper/init"]
 
 write_files:
 
