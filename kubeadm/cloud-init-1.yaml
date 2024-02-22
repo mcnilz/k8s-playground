@@ -1,0 +1,164 @@
+#cloud-config
+
+# ssh_genkeytypes: [ed25519]
+
+apt:
+  sources:
+    docker.list:
+      source: deb [arch=amd64] https://download.docker.com/linux/ubuntu $RELEASE stable
+      keyid: 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+    k8s.list:
+      keyid: 'DE15B14486CD377B9E876E1A234654DA9A296436'
+      keyserver: 'https://prod-cdn.packages.k8s.io/repositories/isv:/kubernetes:/core:/stable:/v1.28/deb/Release.key'
+      source: deb [signed-by=$KEY_FILE] https://prod-cdn.packages.k8s.io/repositories/isv:/kubernetes:/core:/stable:/v1.28/deb/ /
+
+packages:
+- apt-transport-https
+- ca-certificates
+- gpg
+- curl
+- gnupg-agent
+- software-properties-common
+- containerd.io
+- kubelet
+- kubeadm
+- kubectl
+
+runcmd:
+  - [ "/etc/helper/init" ]
+
+users:
+- name: bf
+  uid: 1001
+  gecos: bridgefield
+  sudo: ALL=(ALL) NOPASSWD:ALL
+  groups: users, admin
+  shell: /bin/bash
+  ssh_import_id: None
+  lock_passwd: true
+  ssh_authorized_keys:
+  - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA3KYTYwof2LO8Y6s7qAF2DdIAaqSFcIfOQ6aFUptvaZ martin.schnabel@bridgefield.de
+
+write_files:
+
+- path: /etc/helper/init
+  owner: root:root
+  permissions: '0700'
+  content: |
+    #!/bin/bash
+
+    netplan apply
+    modprobe br_netfilter
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+    systemctl stop apparmor
+    systemctl disable apparmor
+    systemctl restart containerd.service
+    kubeadm completion bash > /etc/bash_completion.d/kubeadm
+    kubectl completion bash > /etc/bash_completion.d/kubectl
+    kubeadm config images pull
+    IP=$(ip -br -4 addr show | grep eth0 | grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}')
+    kubeadm init \
+      --control-plane-endpoint=10.13.31.1 \
+      --apiserver-advertise-address=10.13.31.1 \
+      --pod-network-cidr=172.17.0.0/16 \
+      --apiserver-cert-extra-sans "$IP"
+    kubeadm token create --print-join-command --description "from cloud-init" > /node-sync/join.sh
+    export KUBECONFIG=/etc/kubernetes/admin.conf
+    kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+    kubectl label nodes --all node.kubernetes.io/exclude-from-external-load-balancers-
+    kubectl get all -A -o wide
+    kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.2/manifests/tigera-operator.yaml
+    kubectl create -f /k8s/tigera-net.yaml
+    mkdir -p /home/ubuntu/.kube
+    sudo cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+    sudo chown ubuntu:ubuntu /home/ubuntu/.kube/config
+
+- path: /etc/containerd/config.toml
+  content: |
+    Version = 2
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+      SystemdCgroup = true
+    [plugins.cri]
+      sandbox_image = "registry.k8s.io/pause:3.9"
+
+- path: /etc/modules-load.d/k8s.conf
+  content: |
+    br_netfilter
+    overlay
+
+- path: /etc/sysctl.d/99-z- k8s.conf
+  content: |
+    net.ipv4.ip_forward = 1
+    net.bridge.bridge-nf-call-iptables = 1
+    net.bridge.bridge-nf-call-ip6tables = 1
+
+- path: /usr/local/bin/takeover-kube-config
+  owner: root:root
+  permissions: '0777'
+  content: |
+    mkdir -p $HOME/.kube
+    sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+    sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+- path: /usr/local/bin/renew-san
+  owner: root:root
+  permissions: '0777'
+  content: |
+    #!/bin/bash
+    IP=$(ip -br -4 addr show | grep eth0 | grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}')
+    cat >/k8s/kubeadm-config.conf <<EOL
+    apiVersion: kubeadm.k8s.io/v1beta3
+    kind: ClusterConfiguration
+    apiServer:
+      certSANs:
+      - "${IP}"
+      - "10.13.31.1"
+      - "10.13.31.2"
+    EOL
+    mkdir -p /k8s/backup
+    mv /etc/kubernetes/pki/apiserver.{crt,key} /k8s/backup/
+    kubeadm init phase certs apiserver --config /k8s/kubeadm-config.conf
+    kubeadm init phase upload-config kubeadm --config /k8s/kubeadm-config.conf
+
+- path: /usr/local/bin/config-with-external-ip
+  owner: root:root
+  permissions: '0777'
+  content: |
+    #!/bin/bash
+
+    FILE=/etc/kubernetes/admin.conf
+    IP0=$(ip -br -4 addr show | grep eth0 | grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}')
+    IP1=$(ip -br -4 addr show | grep eth1 | grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}')
+    cat /etc/kubernetes/admin.conf | sed "s/$IP1/$IP0/g"
+
+- path: /k8s/tigera-net.yaml
+  content: |
+    apiVersion: operator.tigera.io/v1
+    kind: Installation
+    metadata:
+      name: default
+    spec:
+      calicoNetwork:
+        ipPools:
+        - blockSize: 26
+          cidr: 172.17.0.0/16
+          encapsulation: VXLANCrossSubnet
+          natOutgoing: Enabled
+          nodeSelector: all()
+    ---
+    apiVersion: operator.tigera.io/v1
+    kind: APIServer
+    metadata:
+      name: default
+    spec: {}
+
+- path: /etc/netplan/10-custom.yaml
+  content: |
+    network:
+      version: 2
+      ethernets:
+          eth1:
+              dhcp4: no
+              match:
+                  macaddress: "52:54:00:4b:ab:cd"
+              addresses: [10.13.31.1/24]
