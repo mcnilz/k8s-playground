@@ -108,6 +108,28 @@ write_files:
     kubeadm init phase certs apiserver --config /k8s/kubeadm-config.conf
     kubeadm init phase upload-config kubeadm --config /k8s/kubeadm-config.conf
 
+- path: /usr/local/bin/setup-metallb
+  owner: root:root
+  permissions: '0777'
+  content: |
+    #!/bin/bash
+
+    kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.3/config/manifests/metallb-native.yaml
+
+    IP=$(ip -br -4 addr show | grep eth0 | grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}')
+    cat >/k8s/metallb-pool.conf <<EOL
+    apiVersion: metallb.io/v1beta1
+    kind: IPAddressPool
+    metadata:
+      name: cheap
+      namespace: metallb-system
+    spec:
+      addresses:
+      - "${IP}/32"
+    EOL
+    kubectl apply -f /k8s/metallb-pool.conf
+    cat /k8s/metallb-pool.conf
+
 - path: /usr/local/bin/config-with-external-ip
   owner: root:root
   permissions: '0777'
